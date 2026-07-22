@@ -44,6 +44,14 @@ def hashes(path: Path, size: int) -> tuple[str, str]:
     return sha256.hexdigest(), git_sha1.hexdigest()
 
 
+def sparse_pattern(path: str) -> str:
+    """Return an anchored literal gitignore pattern for one repository path."""
+    escaped = path.replace("\\", "\\\\")
+    for character in ("*", "?", "[", "]"):
+        escaped = escaped.replace(character, f"\\{character}")
+    return f"/{escaped}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch-dir", required=True, type=Path)
@@ -93,7 +101,15 @@ def main() -> int:
 
     print("fetching selected source blobs", flush=True)
     paths = sorted({record["source_path"] for record in records})
-    run(["git", "checkout", "--no-progress", "HEAD", "--", *paths], cwd=source)
+    patterns = "".join(f"{sparse_pattern(path)}\n" for path in paths)
+    run(["git", "sparse-checkout", "init", "--no-cone"], cwd=source)
+    run(
+        ["git", "sparse-checkout", "set", "--no-cone", "--stdin"],
+        cwd=source,
+        input_text=patterns,
+    )
+    run(["git", "config", "checkout.workers", "0"], cwd=source)
+    run(["git", "checkout", "--no-progress", "HEAD"], cwd=source)
 
     print("verifying source bytes", flush=True)
     verified: dict[str, str] = {}
