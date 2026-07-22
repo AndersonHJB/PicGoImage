@@ -1,0 +1,51 @@
+name: Codex bornforthis image migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      batches_json:
+        description: JSON array of batch numbers
+        required: true
+        default: "[29]"
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    name: Upload batch ${{ matrix.batch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        batch: ${{ fromJSON(inputs.batches_json) }}
+    steps:
+      - name: Checkout migration inputs
+        uses: actions/checkout@v4
+        with:
+          filter: blob:none
+          sparse-checkout: .codex-image-migration
+
+      - name: Configure read-only source key
+        env:
+          SOURCE_DEPLOY_KEY: ${{ secrets.CODEX_SOURCE_REPO_DEPLOY_KEY }}
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          umask 077
+          printf '%s\n' "$SOURCE_DEPLOY_KEY" > "$HOME/.ssh/id_ed25519"
+          ssh-keyscan -t ed25519 github.com > "$HOME/.ssh/known_hosts"
+
+      - name: Verify and upload batch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes
+        run: |
+          batch=$(printf '%02d' '${{ matrix.batch }}')
+          python3 .codex-image-migration/upload_batch.py \
+            --batch-file ".codex-image-migration/batches/${batch}.json" \
+            --source-repo git@github.com:AndersonHJB/bornforthis.cn.git \
+            --target-repo AndersonHJB/PicGoImage \
+            --branch "codex/bornforthis-images-actions-batch-${batch}" \
+            --workdir "$RUNNER_TEMP/batch-${batch}"
