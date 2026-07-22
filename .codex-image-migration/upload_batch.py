@@ -183,7 +183,11 @@ def main() -> int:
             input_text=index_info,
         )
         tree = run(["git", "write-tree"], cwd=source, env=index_env, capture=True)
-        message = f"Add bornforthis.cn article images batch {number:02d} of 29\n"
+        total_batches = int(batch.get("total_batches", 29))
+        message = (
+            f"Add bornforthis.cn article images batch {number:02d} "
+            f"of {total_batches}\n"
+        )
         commit = run(
             ["git", "commit-tree", tree, "-p", parent],
             cwd=source,
