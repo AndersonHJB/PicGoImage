@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy one verified image batch from the private source repo to PicGoImage."""
+"""Copy verified image batches from the private source repo to PicGoImage."""
 
 from __future__ import annotations
 
@@ -46,20 +46,27 @@ def hashes(path: Path, size: int) -> tuple[str, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch-file", required=True, type=Path)
+    parser.add_argument("--batch-dir", required=True, type=Path)
+    parser.add_argument("--batches", required=True, help="comma-separated batch numbers")
     parser.add_argument("--source-repo", required=True)
     parser.add_argument("--target-repo", required=True)
     parser.add_argument("--target-base", default="main")
-    parser.add_argument("--branch", required=True)
+    parser.add_argument("--branch-prefix", required=True)
     parser.add_argument("--workdir", required=True, type=Path)
     args = parser.parse_args()
 
-    batch = json.loads(args.batch_file.read_text(encoding="utf-8"))
-    records = batch["records"]
+    batch_numbers = [int(value) for value in args.batches.split(",") if value.strip()]
+    batches = [
+        json.loads((args.batch_dir / f"{number:02d}.json").read_text(encoding="utf-8"))
+        for number in batch_numbers
+    ]
+    if [batch["number"] for batch in batches] != batch_numbers:
+        raise RuntimeError("batch manifest order mismatch")
+    records = [record for batch in batches for record in batch["records"]]
     expected_bytes = sum(record["size_bytes"] for record in records)
     print(
-        f"batch {batch['number']:02d}: {len(records)} files, "
-        f"{expected_bytes} bytes",
+        f"batches {','.join(str(number) for number in batch_numbers)}: "
+        f"{len(records)} files, {expected_bytes} bytes",
         flush=True,
     )
 
@@ -68,6 +75,7 @@ def main() -> int:
         shutil.rmtree(args.workdir)
     args.workdir.mkdir(parents=True)
 
+    print("cloning source metadata", flush=True)
     run(
         [
             "git",
@@ -83,10 +91,12 @@ def main() -> int:
         ]
     )
 
-    paths = [record["source_path"] for record in records]
+    print("fetching selected source blobs", flush=True)
+    paths = sorted({record["source_path"] for record in records})
     run(["git", "checkout", "--no-progress", "HEAD", "--", *paths], cwd=source)
 
-    entries: list[tuple[str, str]] = []
+    print("verifying source bytes", flush=True)
+    verified: dict[str, str] = {}
     verified_bytes = 0
     for record in records:
         path = source / record["source_path"]
@@ -102,9 +112,10 @@ def main() -> int:
                 f"{sha256} != {record['sha256']}"
             )
         run(["git", "cat-file", "-e", f"{git_sha1}^{{blob}}"], cwd=source)
-        entries.append((git_sha1, record["remote_path"]))
+        verified[record["sha256"]] = git_sha1
         verified_bytes += size
 
+    print("fetching target base", flush=True)
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
         raise RuntimeError("GITHUB_TOKEN is missing")
@@ -122,22 +133,10 @@ def main() -> int:
         cwd=source,
     )
     parent = run(["git", "rev-parse", "FETCH_HEAD"], cwd=source, capture=True)
-
-    index_path = args.workdir / "target.index"
-    index_env = os.environ.copy()
-    index_env["GIT_INDEX_FILE"] = str(index_path)
-    run(["git", "read-tree", parent], cwd=source, env=index_env)
-    index_info = "".join(
-        f"100644 {git_sha1}\t{remote_path}\n"
-        for git_sha1, remote_path in entries
-    )
-    run(
-        ["git", "update-index", "--add", "--index-info"],
-        cwd=source,
-        env=index_env,
-        input_text=index_info,
-    )
-    tree = run(["git", "write-tree"], cwd=source, env=index_env, capture=True)
+    run(["git", "config", "remote.origin.promisor", "false"], cwd=source)
+    run(["git", "config", "remote.target.promisor", "true"], cwd=source)
+    run(["git", "config", "remote.target.partialclonefilter", "blob:none"], cwd=source)
+    run(["git", "config", "extensions.partialClone", "target"], cwd=source)
 
     commit_env = os.environ.copy()
     commit_env.update(
@@ -148,29 +147,54 @@ def main() -> int:
             "GIT_COMMITTER_EMAIL": "41898282+github-actions[bot]@users.noreply.github.com",
         }
     )
-    message = f"Add bornforthis.cn article images batch {batch['number']:02d} of 29\n"
-    commit = run(
-        ["git", "commit-tree", tree, "-p", parent],
-        cwd=source,
-        env=commit_env,
-        input_text=message,
-        capture=True,
-    )
-    run(
-        [
-            "git",
-            "push",
-            "--force",
-            "target",
-            f"{commit}:refs/heads/{args.branch}",
-        ],
-        cwd=source,
-    )
-    print(
-        f"BATCH_DONE number={batch['number']:02d} files={len(records)} "
-        f"bytes={verified_bytes} commit={commit} branch={args.branch}",
-        flush=True,
-    )
+    completed_bytes = 0
+    for batch in batches:
+        number = batch["number"]
+        batch_records = batch["records"]
+        branch = f"{args.branch_prefix}{number:02d}"
+        index_path = args.workdir / f"target-{number:02d}.index"
+        index_env = os.environ.copy()
+        index_env["GIT_INDEX_FILE"] = str(index_path)
+        run(["git", "read-tree", parent], cwd=source, env=index_env)
+        index_info = "".join(
+            f"100644 {verified[record['sha256']]}\t{record['remote_path']}\n"
+            for record in batch_records
+        )
+        run(
+            ["git", "update-index", "--add", "--index-info"],
+            cwd=source,
+            env=index_env,
+            input_text=index_info,
+        )
+        tree = run(["git", "write-tree"], cwd=source, env=index_env, capture=True)
+        message = f"Add bornforthis.cn article images batch {number:02d} of 29\n"
+        commit = run(
+            ["git", "commit-tree", tree, "-p", parent],
+            cwd=source,
+            env=commit_env,
+            input_text=message,
+            capture=True,
+        )
+        print(f"pushing batch {number:02d}", flush=True)
+        run(
+            [
+                "git",
+                "push",
+                "--force",
+                "target",
+                f"{commit}:refs/heads/{branch}",
+            ],
+            cwd=source,
+        )
+        batch_bytes = sum(record["size_bytes"] for record in batch_records)
+        completed_bytes += batch_bytes
+        print(
+            f"BATCH_DONE number={number:02d} files={len(batch_records)} "
+            f"bytes={batch_bytes} commit={commit} branch={branch}",
+            flush=True,
+        )
+    if completed_bytes != verified_bytes:
+        raise RuntimeError(f"verified byte mismatch: {completed_bytes} != {verified_bytes}")
     return 0
 
 

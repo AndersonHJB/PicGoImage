@@ -3,24 +3,24 @@ name: Codex bornforthis image migration
 on:
   workflow_dispatch:
     inputs:
-      batches_json:
-        description: JSON array of batch numbers
+      groups_json:
+        description: JSON array of comma-separated batch groups
         required: true
-        default: "[29]"
+        default: '["29"]'
 
 permissions:
   contents: write
 
 jobs:
   upload:
-    name: Upload batch ${{ matrix.batch }}
+    name: Upload batches ${{ matrix.group }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: 12
+      max-parallel: 3
       matrix:
-        batch: ${{ fromJSON(inputs.batches_json) }}
+        group: ${{ fromJSON(inputs.groups_json) }}
     steps:
       - name: Checkout migration inputs
         uses: actions/checkout@v4
@@ -42,10 +42,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GIT_SSH_COMMAND: ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes
         run: |
-          batch=$(printf '%02d' '${{ matrix.batch }}')
           python3 .codex-image-migration/upload_batch.py \
-            --batch-file ".codex-image-migration/batches/${batch}.json" \
+            --batch-dir .codex-image-migration/batches \
+            --batches '${{ matrix.group }}' \
             --source-repo git@github.com:AndersonHJB/bornforthis.cn.git \
             --target-repo AndersonHJB/PicGoImage \
-            --branch "codex/bornforthis-images-actions-batch-${batch}" \
-            --workdir "$RUNNER_TEMP/batch-${batch}"
+            --branch-prefix codex/bornforthis-images-actions-batch- \
+            --workdir "$RUNNER_TEMP/batches-${{ strategy.job-index }}"
